@@ -1,0 +1,387 @@
+#!/bin/bash
+# Generate a semantic version from conventional commits in a git repository.
+
+set -e
+
+declare -a MINOR_TYPES=("feat")
+readonly MINOR_TYPES
+
+declare -a PATCH_TYPES=("fix" "patch")
+readonly PATCH_TYPES
+
+readonly UNSTABLE_START_TAG="0.0.0"
+readonly NOCHANGE_INDICATOR="==="
+
+declare -a parsed_commits=()
+
+##############################################################################
+# Display usage information.
+#
+print_help() {
+  cat <<-EOF
+Usage: genversion [OPTION]...
+Generate a semantic version from conventional commits in a git repository. 
+Commit messages are examined between the remote's latest tag and the current
+HEAD. 
+
+Output:
+The utility outputs a tag in the form '1.2.3' if a version bump is required. If
+no version changes are detected, the '===' no-change indicator is printed. In
+cases where a code repository has no tag history, the unstable '0.0.0' tag is 
+output.
+
+Arguments:
+  -h    display this help and exit
+  -v    (verbose) display all program output during execution
+EOF
+}
+
+##############################################################################
+# Display and send errors to stderr.
+#
+# Arguments:
+#   string: [$*] Error messages passed from the calling function
+#
+report_error() {
+  echo "Error: $*" >&2
+}
+
+##############################################################################
+# Ensure that the remote repository exists. 
+#
+# Returns:
+#   int: 0 if remote is available
+# Exits:
+#   int: 1 on failure
+#
+try_remote() {
+  local status
+
+  status="$(git ls-remote --quiet --exit-code 1>/dev/null; echo $?)"
+
+  if [ "$status" -ne 0 ]; then
+    report_error "Remote is not configured or is unavailable [git error ${status}]."
+    exit 1
+  fi
+
+  return 0
+}
+
+##############################################################################
+# Query and return the latest project tag. If no tags exist, use 
+# `UNSTABLE_START_TAG` as the initial value. 
+#
+# Output:
+#   string: 
+#     - E.g., "1.2.3" (or "v1.2.3") on remotes returning a tag
+#     - "0.0.0" when project is not yet tagged
+#
+query_latest_tag() {
+  local query
+  local tag
+
+  git fetch --tags origin
+
+  query="$(git describe --tags --abbrev=0 2>/dev/null || echo $?)"
+
+  tag=$([[ $query == "128" ]] \
+    && echo "${UNSTABLE_START_TAG}" \
+    || echo "${query}"
+  )
+
+  echo "${tag}"
+}
+
+##############################################################################
+# Use the git log to find any commits made between the latest pushed tag and
+# the branch's HEAD.
+#
+# Globals:
+#   string: [UNSTABLE_START_TAG] Defines the default tag for untagged repos
+# Arguments:
+#   string: [$1] A semantic tag in the form "1.2.3" used as the starting tag 
+#     for querying commit history
+# Output:
+#   string: A list of git commit records delimited by "-----COMMIT-----"
+#
+query_commits() {
+  local commit_hash
+  local commit_list
+  local start_tag="$1"
+  readonly start_tag
+
+  if [ "${UNSTABLE_START_TAG}" == "${start_tag}" ]; then
+    commit_list="$(
+      git log HEAD --pretty=format:'-----COMMIT-----%n%s%b%n' || echo $?
+    )"
+  else
+    commit_hash="$(git rev-list -n 1 "${start_tag}")"
+
+    commit_list="$(git log "${commit_hash}"..HEAD \
+      --pretty=format:'-----COMMIT-----%n%s%b%n' || echo $?
+    )"
+  fi
+
+  echo "${commit_list}"
+}
+
+##############################################################################
+# Split git commit records into an array.
+#
+# Globals:
+#   array: [processed_commits] Used to store the function's output as an array 
+#     of trimmed commit records
+# Arguments:
+#   string: [$1 --> queried_commits] A list of commits extracted and delimited 
+#     by the `query_commits()` function
+#   array: [$2 --> processed_commits] The global array variable used to store
+#     processed commits is assigned as a local function nameref
+#
+parse_commits() {
+  local queried_commits="$1"
+  readonly queried_commits
+  local -n processed_commits="$2"
+
+  processed_commits=()
+
+  while IFS= read -r -d '' commit; do
+    processed_commits+=("${commit}")
+  done < <(awk '
+    BEGIN { RS="-----COMMIT-----\n" } 
+    NR > 1 { 
+        sub(/\n+$/, "", $0)
+        printf "%s\0", $0 
+    }' <<< "${queried_commits}"
+  )
+}
+
+##############################################################################
+# Analyze the preprocessed commit records for Conventional Commits indicators
+# and use these to generate a new semantic version.
+#
+# Globals:
+#   array: [parsed_commits] The array of commit records to be analyzed
+# Arguments:
+#   string: [$1 --> latest_tag] The repository's most recent tag 
+# Output:
+#   string: 
+#     - A semantic version tag in the form `1.2.3` if a version bump is required
+#     - '===' if no version changes are detected
+#
+# TODO(hashbanged@protonmail.com): Split this into separate functions
+#
+generate_version() {
+  local latest_tag=$1
+  readonly latest_tag
+
+  local is_major_bump=0
+  local is_minor_bump=0
+  local is_patch_bump=0
+  local is_minor_type
+  local is_patch_type
+  local is_new_tag
+  local major
+  local minor
+  local patch
+
+  # Extracted commit message groups:
+  #   1 - type
+  #   2 - scope group (not used)
+  #   3 - scope
+  #   4 - breaking change short identifier: `!`
+  #   5 - description
+  local message_pattern='^([a-zA-Z]+)(\(([a-zA-Z]+)\)){0,1}(!){0,1}: (.+)$'
+  readonly message_pattern
+
+  local message_replacement="\1|\3|\4|\5"
+  readonly message_replacement
+
+  # Extracted version groups:
+  #   1 - major
+  #   2 - minor
+  #   3 - patch
+  #   4 - subidentifier
+  #   5 - subidentifier type:
+  #     `-` = prelease
+  #     `+` = build
+  #   6 - subidentifier version
+  local version_pattern='^v{0,1}([0-9]+).([0-9]+).([0-9]+)((-|\+)([a-zA-Z0-9.-]+)){0,1}$'
+  readonly version_pattern
+
+  local version_replacement="\1|\2|\3|\5|\6"
+  readonly version_replacement
+
+  for commit in "${parsed_commits[@]}"; do
+    local line_number=0
+
+    while IFS= read -r line; do 
+      # Skip evaluation of empty lines.
+      [[ -z "${line}" ]] && continue
+
+      local type
+      local _scope
+      local breaking
+      local _description
+
+      # Check for commit message patterns expected in the first line only.
+      # This includes the commit type, optional scope, optional breaking flag
+      # (short version), and required description. First-line message
+      # values are case-insensitive to align with the conventional commits spec.
+      if [[ "${line_number}" == 0 ]]; then
+        IFS='|' read -r type _scope breaking _description \
+          <<< "$(sed -n -E "s/${message_pattern}/${message_replacement}/gIp" \
+          <<< "${line}")"
+
+        [[ "!" == "${breaking}" ]] && is_major_bump=1
+
+        is_minor_type=$(in_array "${type}" "${MINOR_TYPES[@]}")
+        [[ "${is_minor_type}" == "true" ]] && is_minor_bump=1
+
+        is_patch_type=$(in_array "${type}" "${PATCH_TYPES[@]}")
+        [[ "${is_patch_type}" == "true" ]] && is_patch_bump=1
+      else
+        # Look for the breaking change token in the message footer.
+        local is_breaking_change
+        
+        is_breaking_change=$( 
+          (echo "${line}" | grep -q -P "^BREAKING(-| )CHANGE: "); echo "$?" 
+        )
+
+        [[ "${is_breaking_change}" -eq 0 ]] && is_major_bump=1
+      fi
+
+      line_number=$(("${line_number}" + 1))
+    done <<< "${commit}"
+  done
+
+  IFS='|' read -r major minor patch _subidentifier_type _subidentifier \
+    <<< "$(sed -n -E "s/${version_pattern}/${version_replacement}/gp" \
+    <<< "${latest_tag}")"
+
+  if [[ "${is_major_bump}" == 1 ]]; then
+    major=$(("${major}" + 1))
+    minor=0
+    patch=0
+  elif [[ "${is_minor_bump}" == 1 ]]; then
+    minor=$(("${minor}" + 1))
+    patch=0
+  elif [[ "${is_patch_bump}" == 1 ]]; then
+    patch=$(("${patch}" + 1))
+  fi
+
+  is_new_tag=$(("${is_major_bump}" + "${is_minor_bump}" + "${is_patch_bump}"))
+
+  [[ "${is_new_tag}" -gt 0 ]] \
+    && echo "${major}.${minor}.${patch}" \
+    || echo "${NOCHANGE_INDICATOR}"
+}
+
+##############################################################################
+# Check if an array contains a value. Comparisons are case-insensitive.
+#
+# Arguments:
+#   string: [$1 --> needle] The value being searched
+#   array: [$2 --> haystack] An array of values to be searched
+# Output:
+#   string: A boolean represented as a "true"/"false" string
+#
+in_array() {
+  local needle="$1"
+  readonly needle
+  shift
+
+  local haystack_item
+  local is_found="false"
+
+  if [[ -z "${needle}" ]]; then
+    echo "false"
+  else 
+    for haystack_item in "$@"; do
+      [[ "${haystack_item,,}" == "${needle,,}" ]] && is_found="true"
+    done
+  fi
+
+  echo "${is_found}"
+}
+
+##############################################################################
+# Hide output by directing stdout and stderr to FDs 3 and 4.
+#
+suppress_output() {
+  exec 3>&1 4>&2
+  exec 1>/dev/null 2>/dev/null
+}
+
+##############################################################################
+# Resume sending stdout and stderr output to FDs 1 and 2.
+#
+restore_output() {
+  exec 1>&3 2>&4
+}
+
+##############################################################################
+# Main
+#
+# Arguments:
+#   array: [$@] All program-level command arguments for getopts
+# Output:
+#   string: 
+#     - A semantic version tag in the form `1.2.3` if a version bump is required
+#     - An empty string if no version changes are detected
+#
+main() {
+  local OPTIND 
+  local OPTARG
+  local opt
+  local is_verbose=0
+
+  while getopts ":hv" opt; do
+    case "${opt}" in
+      h)
+        print_help
+        exit 0
+        ;;
+      v) 
+        is_verbose=1
+        ;;
+      \?)
+        report_error "Invalid option: -${OPTARG}"
+        ;;
+    esac
+  done
+
+  shift $((OPTIND - 1))
+
+  [[ "${is_verbose}" == 0 ]] && suppress_output
+
+  echo "Checking if remote repository is available."
+  try_remote
+
+  echo "Querying for latest semver tag."
+  latest_tag=$(query_latest_tag)
+  echo "Discovered latest tag ${latest_tag}."
+
+  echo "Getting list of commit records."
+  commit_list=$(query_commits "${latest_tag}")
+
+  echo "Parsing commit records."
+  parse_commits "${commit_list}" $!parsed_commits
+
+  echo "Examining records for version change."
+  version="$(generate_version "${latest_tag}")"
+
+  if [ "${version}" == "${NOCHANGE_INDICATOR}" ]; then 
+    echo "No version change detected."
+  else 
+    echo "New version generated."
+  fi
+  
+  [[ "${is_verbose}" == 0 ]] && restore_output
+  echo "${version}"
+}
+
+##############################################################################
+
+main "$@"
+
+exit 0
