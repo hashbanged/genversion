@@ -9,8 +9,9 @@ readonly MINOR_TYPES
 declare -a PATCH_TYPES=("fix" "patch")
 readonly PATCH_TYPES
 
-readonly UNSTABLE_START_TAG="0.0.0"
 readonly NOCHANGE_INDICATOR="==="
+readonly UNSTABLE_START_TAG="0.0.0"
+readonly UNTAGGED="untagged"
 
 declare -a parsed_commits=()
 
@@ -68,13 +69,13 @@ try_remote() {
 }
 
 ##############################################################################
-# Query and return the latest project tag. If no tags exist, use 
-# `UNSTABLE_START_TAG` as the initial value. 
+# Query and output the latest project tag. If no tags exist, output the `EMPTY`
+# constant. 
 #
 # Output:
 #   string: 
 #     - E.g., "1.2.3" (or "v1.2.3") on remotes returning a tag
-#     - "0.0.0" when project is not yet tagged
+#     - "untagged" when project is not yet tagged
 #
 query_latest_tag() {
   local query
@@ -85,7 +86,7 @@ query_latest_tag() {
   query="$(git describe --tags --abbrev=0 2>/dev/null || echo $?)"
 
   tag=$([[ $query == "128" ]] \
-    && echo "${UNSTABLE_START_TAG}" \
+    && echo "${UNTAGGED}" \
     || echo "${query}"
   )
 
@@ -326,14 +327,18 @@ restore_output() {
 #   array: [$@] All program-level command arguments for getopts
 # Output:
 #   string: 
+#     - An unstable start tag (`0.0.0`) if the remote repository is untagged
 #     - A semantic version tag in the form `1.2.3` if a version bump is required
-#     - An empty string if no version changes are detected
+#     - An no-change indicator string (`===`) if no version changes are detected
 #
 main() {
+  local commit_list
+  local is_verbose=0
+  local latest_tag
   local OPTIND 
   local OPTARG
   local opt
-  local is_verbose=0
+  local version
 
   while getopts ":hv" opt; do
     case "${opt}" in
@@ -359,21 +364,27 @@ main() {
 
   echo "Querying for latest semver tag."
   latest_tag=$(query_latest_tag)
-  echo "Discovered latest tag ${latest_tag}."
 
-  echo "Getting list of commit records."
-  commit_list=$(query_commits "${latest_tag}")
+  if [[ "${EMPTY}" == "${latest_tag}" ]]; then
+    echo "Setting initial repository tag ${UNSTABLE_START_TAG}."
+    version="${UNSTABLE_START_TAG}"
+  else
+    echo "Discovered latest tag ${latest_tag}."
 
-  echo "Parsing commit records."
-  parse_commits "${commit_list}" $!parsed_commits
+    echo "Getting list of commit records."
+    commit_list=$(query_commits "${latest_tag}")
 
-  echo "Examining records for version change."
-  version="$(generate_version "${latest_tag}")"
+    echo "Parsing commit records."
+    parse_commits "${commit_list}" $!parsed_commits
 
-  if [ "${version}" == "${NOCHANGE_INDICATOR}" ]; then 
-    echo "No version change detected."
-  else 
-    echo "New version generated."
+    echo "Examining records for version change."
+    version="$(generate_version "${latest_tag}")"
+
+    if [ "${version}" == "${NOCHANGE_INDICATOR}" ]; then 
+      echo "No version change detected."
+    else 
+      echo "New version generated."
+    fi
   fi
   
   [[ "${is_verbose}" == 0 ]] && restore_output
