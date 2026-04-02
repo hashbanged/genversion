@@ -45,11 +45,15 @@ cd ~/projects/my-test-project-with-tags
 docker run --rm -v $(pwd):/app genversion:latest
 ```
 
-Arguments (`-h`, `-v`) may be passed to the container script:
+Arguments (`-h`, `-u`, `-v`) may be passed to the container script:
 
 ```sh
-docker run --rm -v $(pwd):/app genversion:latest "-h"
+docker run --rm -v $(pwd):/app genversion:latest -h
 ```
+
+### Running in a pipeline
+
+In pipeline environments that shallow-clone a repository by default, the latest remote tag may not be retrieved. Use the **unshallow** (`-u`) argument to fetch a project's history up to the maximum 32-bit integer size (2,147,483,647). Note that this is not the same as running `git fetch --unshallow`, and performance should be considered in large repositories.
 
 ### Program output
 
