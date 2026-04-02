@@ -35,6 +35,9 @@ output.
 
 Arguments:
   -h    display this help and exit
+  -l    (local) use only the local git repository when querying tags
+  -u    (unshallow) use a max integer (32 bit) to approximate git's 
+        '--unshallow' switch when querying tags
   -v    (verbose) display all program output during execution
 EOF
 }
@@ -74,6 +77,10 @@ try_remote() {
 # Query and output the latest project tag. If no tags exist, output the `EMPTY`
 # constant. 
 #
+# Arguments:
+#   int: [$1] Boolean representation for repository depth:
+#     - 1 = unshallow with max 32-bit int size
+#
 # Output:
 #   string: 
 #     - E.g., "1.2.3" (or "v1.2.3") on remotes returning a tag
@@ -82,8 +89,13 @@ try_remote() {
 query_latest_tag() {
   local query
   local tag
+  local origin
+  local unshallow
 
-  git fetch --tags origin
+  [[ "$1" == "1" ]] && unshallow="--depth=2147483647"
+  [[ "$2" != "1" ]] && origin="origin"
+
+  git fetch --tags $unshallow $origin -v
 
   query="$(git describe --tags --abbrev=0 2>/dev/null || echo $?)"
 
@@ -144,16 +156,14 @@ parse_commits() {
   local queried_commits="$1"
   readonly queried_commits
   local -n processed_commits="$2"
-
   processed_commits=()
 
-  while IFS= read -r -d '' commit; do
-    processed_commits+=("${commit}")
+  while IFS= read -r commit; do 
+      processed_commits+=("${commit}")
   done < <(awk '
     BEGIN { RS="-----COMMIT-----\n" } 
     NR > 1 { 
-        sub(/\n+$/, "", $0)
-        printf "%s\0", $0 
+      printf "%s\0", $0
     }' <<< "${queried_commits}"
   )
 }
@@ -335,6 +345,8 @@ restore_output() {
 #
 main() {
   local commit_list
+  local is_local_only=0
+  local is_unshallow=0
   local is_verbose=0
   local latest_tag
   local OPTIND 
@@ -342,17 +354,24 @@ main() {
   local opt
   local version
 
-  while getopts ":hv" opt; do
+  while getopts ":hluv" opt; do
     case "${opt}" in
       h)
         print_help
         exit 0
+        ;;
+      l)
+        is_local_only=1
+        ;;
+      u)
+        is_unshallow=1
         ;;
       v) 
         is_verbose=1
         ;;
       \?)
         report_error "Invalid option: -${OPTARG}"
+        exit 1
         ;;
     esac
   done
@@ -361,11 +380,14 @@ main() {
 
   [[ "${is_verbose}" == 0 ]] && suppress_output
 
-  echo "Checking if remote repository is available."
-  try_remote
+  if [[ "${is_local_only}" == 0 ]]; then 
+    try_remote
+  else
+    echo "Using local-only git repository to query tags."
+  fi
 
   echo "Querying for latest semver tag."
-  latest_tag=$(query_latest_tag)
+  latest_tag=$(query_latest_tag "${is_unshallow}" "${is_local_only}")
 
   if [[ "${UNTAGGED}" == "${latest_tag}" ]]; then
     echo "Setting initial repository tag ${UNSTABLE_START_TAG}."
