@@ -1,12 +1,14 @@
-FROM alpine:3.22.2 AS alpine
+FROM alpine:3.23.3 AS alpine
 
 COPY ./bin/genversion /tmp/genversion
 
-RUN apk add --no-cache \
+RUN apk update && apk add --no-cache \
         bash \
+        busybox \ 
         git \
         openssh-client \
-    && mv /tmp/genversion /usr/local/bin/genversion \
+        zlib=1.3.2-r0; \
+    mv /tmp/genversion /usr/local/bin/genversion \
     && chmod 744 /usr/local/bin/genversion \
     && mkdir /app
 WORKDIR /app
