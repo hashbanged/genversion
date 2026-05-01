@@ -74,8 +74,11 @@ try_remote() {
 }
 
 ##############################################################################
-# Query and output the latest project tag. If no tags exist, output the `EMPTY`
-# constant. 
+# Query and output the latest project tag. A matcher is used to filter tags and
+# only return a semver pattern (1.2.3, v1.2.3), so, for example,
+# `staging-28c8f77d` would not be considered for output. 
+# 
+# If no tags exist, output the `EMPTY` constant. 
 #
 # Arguments:
 #   int: [$1] Boolean representation for repository depth:
@@ -97,7 +100,12 @@ query_latest_tag() {
 
   git fetch --tags $unshallow $origin -v
 
-  query="$(git describe --tags --abbrev=0 2>/dev/null || echo $?)"
+  query="$(git describe \
+    --tags \
+    --abbrev=0 \
+    --match="v[0-9]\.[0-9]\.[0-9]*" \
+    --match="[0-9]\.[0-9]\.[0-9]*" \
+  )"
 
   tag=$([[ $query == "128" ]] \
     && echo "${UNTAGGED}" \
